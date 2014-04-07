@@ -248,6 +248,8 @@ class SeparateCompiler
 	fun do_property_coloring do
 		var mclasses = new HashSet[MClass].from(modelbuilder.model.mclasses)
 
+		var rta = runtime_type_analysis
+
 		# Layouts
 		var method_layout_builder: PropertyLayoutBuilder[PropertyLayoutElement]
 		var attribute_layout_builder: PropertyLayoutBuilder[MAttribute]
@@ -269,6 +271,9 @@ class SeparateCompiler
 		attribute_layout_builder = new MPropertyColorer[MAttribute](self.mainmodule, class_layout_builder)
 		#end
 
+		# The dead methods, still need to provide a dead color symbol
+		var dead_methods = new Array[MMethod]
+
 		# lookup properties to build layout with
 		var mmethods = new HashMap[MClass, Set[PropertyLayoutElement]]
 		var mattributes = new HashMap[MClass, Set[MAttribute]]
@@ -277,6 +282,10 @@ class SeparateCompiler
 			mattributes[mclass] = new HashSet[MAttribute]
 			for mprop in self.mainmodule.properties(mclass) do
 				if mprop isa MMethod then
+					if rta != null and not rta.live_methods.has(mprop) then
+						dead_methods.add(mprop)
+						continue
+					end
 					mmethods[mclass].add(mprop)
 				else if mprop isa MAttribute then
 					mattributes[mclass].add(mprop)
@@ -299,8 +308,8 @@ class SeparateCompiler
 
 		# lookup super calls and add it to the list of mmethods to build layout with
 		var super_calls
-		if runtime_type_analysis != null then
-			super_calls = runtime_type_analysis.live_super_sends
+		if rta != null then
+			super_calls = rta.live_super_sends
 		else
 			super_calls = all_super_calls
 		end
@@ -318,7 +327,10 @@ class SeparateCompiler
 		self.method_tables = build_method_tables(mclasses, super_calls)
 		self.compile_color_consts(method_layout.pos)
 
-		# attribute null color to dead supercalls
+		# attribute null color to dead methods and supercalls
+		for mproperty in dead_methods do
+			compile_color_const(new_visitor, mproperty, -1)
+		end
 		for mpropdef in all_super_calls do
 			if super_calls.has(mpropdef) then continue
 			compile_color_const(new_visitor, mpropdef, -1)
@@ -348,6 +360,7 @@ class SeparateCompiler
 				if parent == mclass then continue
 				for mproperty in self.mainmodule.properties(parent) do
 					if not mproperty isa MMethod then continue
+					if not layout.pos.has_key(mproperty) then continue
 					var color = layout.pos[mproperty]
 					if table.length <= color then
 						for i in [table.length .. color[ do
@@ -374,6 +387,7 @@ class SeparateCompiler
 			# then override with local properties
 			for mproperty in self.mainmodule.properties(mclass) do
 				if not mproperty isa MMethod then continue
+				if not layout.pos.has_key(mproperty) then continue
 				var color = layout.pos[mproperty]
 				if table.length <= color then
 					for i in [table.length .. color[ do
@@ -751,7 +765,9 @@ class SeparateCompiler
 		var attrs = self.attr_tables[mclass]
 		var v = new_visitor
 
-		var is_dead = runtime_type_analysis != null and not runtime_type_analysis.live_classes.has(mclass) and mtype.ctype == "val*" and mclass.name != "NativeArray"
+		var rta = runtime_type_analysis
+
+		var is_dead = rta != null and not rta.live_classes.has(mclass) and mtype.ctype == "val*" and mclass.name != "NativeArray"
 
 		v.add_decl("/* runtime class {c_name} */")
 
@@ -767,6 +783,10 @@ class SeparateCompiler
 					v.add_decl("NULL, /* empty */")
 				else
 					assert mpropdef isa MMethodDef
+					if not rta.live_methoddefs.has(mpropdef) then
+						v.add_decl("NULL, /* DEAD {mclass.intro_mmodule}:{mclass}:{mpropdef} */")
+						continue
+					end
 					var rf = mpropdef.virtual_runtime_function
 					v.require_declaration(rf.c_name)
 					v.add_decl("(nitmethod_t){rf.c_name}, /* pointer to {mclass.intro_mmodule}:{mclass}:{mpropdef} */")
@@ -786,7 +806,7 @@ class SeparateCompiler
 				self.header.add_decl("\};")
 			end
 
-			if not self.runtime_type_analysis.live_types.has(mtype) then return
+			if not rta.live_types.has(mtype) then return
 
 			#Build BOX
 			self.provide_declaration("BOX_{c_name}", "val* BOX_{c_name}({mtype.ctype});")
